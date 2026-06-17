@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Circle, Plug, PlugZap } from 'lucide-react'
 import { decodePayload, hexToBytes, FIELD_DISPLAY, type ParsedFrame } from '@/lib/parser'
 import { cn } from '@/lib/utils'
@@ -36,6 +36,8 @@ export default function RawPage() {
   const [status, setStatus] = useState('Disconnected')
   const [frames, setFrames] = useState<ParsedFrame[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [auto, setAuto] = useState(true)
+  const listRef = useRef<HTMLDivElement>(null)
 
   const port = localStorage.getItem('serial-port') ?? ''
   const baud = JSON.parse(localStorage.getItem('baud-rate') ?? '115200') as number
@@ -49,7 +51,6 @@ export default function RawPage() {
         return f ? [f] : []
       })
       setFrames(loaded)
-      if (loaded.length > 0) setSelectedId(loaded[0].id)
     })
   }, [])
 
@@ -76,7 +77,6 @@ export default function RawPage() {
             const next = [frame, ...prev]
             return next.length > MAX_FRAMES ? next.slice(0, MAX_FRAMES) : next
           })
-          setSelectedId(id => id === null ? frame.id : id)
         } catch {
           // malformed frame
         }
@@ -84,6 +84,11 @@ export default function RawPage() {
     })
     return unsub
   }, [])
+
+  // When auto is on, scroll to top whenever a new packet arrives
+  useEffect(() => {
+    if (auto) listRef.current?.scrollTo({ top: 0 })
+  }, [auto, frames.length])
 
   async function toggleConnection() {
     if (connected) {
@@ -104,7 +109,14 @@ export default function RawPage() {
     }
   }
 
-  const selected = frames.find(f => f.id === selectedId) ?? null
+  function enableAuto() {
+    setAuto(true)
+    listRef.current?.scrollTo({ top: 0 })
+  }
+
+  // In auto mode always show the newest packet; otherwise show the manually selected one
+  const effectiveId = auto ? (frames[0]?.id ?? null) : selectedId
+  const selected = frames.find(f => f.id === effectiveId) ?? null
 
   return (
     <div className="flex h-full flex-col">
@@ -115,6 +127,17 @@ export default function RawPage() {
         />
         <span className="flex-1 text-xs text-muted-foreground">{status}</span>
         <span className="text-xs text-muted-foreground">{frames.length} packets</span>
+        <button
+          onClick={auto ? () => setAuto(false) : enableAuto}
+          className={cn(
+            'flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
+            auto
+              ? 'border-green-500/50 bg-green-500/10 text-green-500'
+              : 'border-border text-muted-foreground hover:bg-accent'
+          )}
+        >
+          AUTO
+        </button>
         <button
           onClick={toggleConnection}
           className={cn(
@@ -132,7 +155,7 @@ export default function RawPage() {
       {/* Split pane */}
       <div className="flex flex-1 overflow-hidden">
         {/* Packet list */}
-        <div className="w-64 flex-shrink-0 overflow-y-auto border-r border-border">
+        <div ref={listRef} className="w-64 flex-shrink-0 overflow-y-auto border-r border-border">
           {frames.length === 0 && (
             <p className="px-4 py-6 text-center text-xs text-muted-foreground">
               {connected ? 'Waiting for packets…' : 'Connect to start receiving'}
@@ -141,10 +164,10 @@ export default function RawPage() {
           {frames.map(f => (
             <button
               key={f.id}
-              onClick={() => setSelectedId(f.id)}
+              onClick={() => { setAuto(false); setSelectedId(f.id) }}
               className={cn(
                 'w-full border-b border-border px-3 py-2 text-left transition-colors',
-                selectedId === f.id
+                effectiveId === f.id
                   ? 'bg-accent text-accent-foreground'
                   : 'hover:bg-accent/50'
               )}
