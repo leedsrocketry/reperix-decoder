@@ -1,13 +1,51 @@
 import { app, shell, BrowserWindow, session, ipcMain } from 'electron'
 import { join } from 'path'
-import { execFile, spawn, ChildProcess } from 'child_process'
-import { createInterface } from 'readline'
 import { is } from '@electron-toolkit/utils'
-
-app.commandLine.appendSwitch('enable-features', 'WebSerial')
+import { SerialPort } from 'serialport'
+import { existsSync } from 'fs'
+import { insertFrame, getFrames } from './db'
 
 let mainWindow: BrowserWindow | null = null
-let serialProcess: ChildProcess | null = null
+let serialPort: SerialPort | null = null
+
+const START_COMMAND = 'start101Reperix\n'
+
+const META_RE = /Grssi(-?\d+)\/Gsnr(-?\d+)/
+const GTOKEN_RE = /G(?:startOk|error|stop|busy)[^\s|]*/g
+
+function processBuffer(
+  buf: string,
+  onPacket: (hex: string, rssi: number | null, snr: number | null) => void,
+  onStatus: (token: string) => void,
+): string {
+  for (const m of buf.matchAll(GTOKEN_RE)) onStatus(m[0])
+
+  const markers: number[] = []
+  let pos = 0
+  while ((pos = buf.indexOf('RB', pos)) !== -1) { markers.push(pos); pos += 2 }
+
+  if (markers.length < 2) return buf
+
+  let lastEnd = 0
+  for (let i = 0; i < markers.length - 1; i++) {
+    const chunk = buf.slice(markers[i], markers[i + 1])
+    const bar = chunk.indexOf('|')
+    if (bar === -1) continue
+
+    let hex = chunk.slice(2, bar).replace(/[^0-9a-fA-F]/g, '')
+    if (hex.length % 2 === 1) hex = hex.slice(0, -1)
+
+    const meta = chunk.slice(bar + 1)
+    const mm = META_RE.exec(meta)
+    const rssi = mm ? parseInt(mm[1]) : null
+    const snr  = mm ? parseInt(mm[2]) : null
+
+    if (hex.length >= 80) onPacket(hex, rssi, snr)  // 40 bytes minimum = 80 hex chars
+    lastEnd = markers[i + 1]
+  }
+
+  return buf.slice(lastEnd)
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -20,12 +58,8 @@ function createWindow(): void {
     },
   })
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow!.show()
-  })
-
+  mainWindow.on('ready-to-show', () => mainWindow!.show())
   mainWindow.webContents.openDevTools()
-
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
@@ -40,62 +74,74 @@ function createWindow(): void {
 
 // ── Serial port listing ──────────────────────────────────────────────────────
 
-ipcMain.handle('serial:list-ports', () => {
-  return new Promise<string[]>((resolve) => {
-    execFile('ls', ['/dev/'], (err, stdout) => {
-      if (err) return resolve([])
-      const ports = stdout
-        .split('\n')
-        .map(p => p.trim())
-        .filter(p => p.startsWith('cu.'))
-        .map(p => `/dev/${p}`)
-      resolve(ports)
-    })
-  })
+ipcMain.handle('serial:list-ports', async () => {
+  const ports = await SerialPort.list()
+  return ports.map(p => p.path)
 })
 
 // ── Serial connect / disconnect ──────────────────────────────────────────────
 
-ipcMain.handle('serial:connect', (_event, port: string, baud: number) => {
-  if (serialProcess) {
-    serialProcess.kill()
-    serialProcess = null
+ipcMain.handle('serial:connect', async (_event, port: string, baud: number) => {
+  // console.log('connect path =', JSON.stringify(port))      // exact string, exposes stray \n / spaces
+  // console.log('exists?      =', existsSync(port))           // does THIS process see the node?
+  // console.log('list:', (await SerialPort.list()).map(p => p.path))  // does Electron's serialport see it?
+
+  // strip any quotes or whitespace from the port string
+  port = port.trim().replace(/^["']|["']$/g, '')
+
+  if (serialPort?.isOpen) {
+    serialPort.close()
+    serialPort = null
   }
 
-  const scriptPath = is.dev
-    ? join(app.getAppPath(), 'main.py')
-    : join(process.resourcesPath, 'main.py')
+  return new Promise<{ ok: boolean }>((resolve) => {
+    const sp = new SerialPort({ path: port, baudRate: baud, autoOpen: false })
 
-  serialProcess = spawn('uv', ['run', scriptPath, '--port', port, '--baud', String(baud), '--json'], {
-    cwd: is.dev ? app.getAppPath() : process.resourcesPath,
+    sp.open((err) => {
+      if (err) {
+        mainWindow?.webContents.send('serial:data', { type: 'error', message: err.message })
+        return resolve({ ok: false })
+      }
+
+      serialPort = sp
+      let buf = ''
+
+      sp.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('ascii')
+        buf = processBuffer(
+          buf,
+          (rawHex, rssi, snr) => {
+            const ts = new Date().toISOString().slice(11, 23)
+            const dbId = insertFrame(ts, rawHex, rssi, snr)
+            mainWindow?.webContents.send('serial:data', { type: 'frame', rawHex, rssi, snr, dbId, ts })
+          },
+          (token) => mainWindow?.webContents.send('serial:data', { type: 'status', token }),
+        )
+        if (buf.length > 65536) buf = buf.slice(-4096)
+      })
+
+      sp.on('error', (e) => {
+        mainWindow?.webContents.send('serial:data', { type: 'error', message: e.message })
+        serialPort = null
+      })
+
+      sp.on('close', () => {
+        mainWindow?.webContents.send('serial:data', { type: 'status', token: 'disconnected' })
+        serialPort = null
+      })
+
+      setTimeout(() => sp.write(START_COMMAND), 300)
+      resolve({ ok: true })
+    })
   })
-
-  const rl = createInterface({ input: serialProcess.stdout! })
-  rl.on('line', (line) => {
-    try {
-      const msg = JSON.parse(line)
-      mainWindow?.webContents.send('serial:data', msg)
-    } catch {
-      // ignore non-JSON lines
-    }
-  })
-
-  serialProcess.stderr?.on('data', (data) => {
-    mainWindow?.webContents.send('serial:data', { type: 'error', message: String(data) })
-  })
-
-  serialProcess.on('exit', (code) => {
-    mainWindow?.webContents.send('serial:data', { type: 'status', token: `process exited (${code})` })
-    serialProcess = null
-  })
-
-  return { ok: true }
 })
 
+ipcMain.handle('db:get-frames', (_event, limit: number) => getFrames(limit))
+
 ipcMain.handle('serial:disconnect', () => {
-  if (serialProcess) {
-    serialProcess.kill()
-    serialProcess = null
+  if (serialPort?.isOpen) {
+    serialPort.close()
+    serialPort = null
   }
   return { ok: true }
 })
@@ -103,23 +149,15 @@ ipcMain.handle('serial:disconnect', () => {
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
-    if (permission === 'serial') return true
-    return false
-  })
-  session.defaultSession.setDevicePermissionHandler((details) => {
-    if (details.deviceType === 'serial') return true
-    return false
-  })
-
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'serial')
+  session.defaultSession.setDevicePermissionHandler((details) => details.deviceType === 'serial')
   createWindow()
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
 app.on('window-all-closed', () => {
-  if (serialProcess) serialProcess.kill()
+  if (serialPort?.isOpen) serialPort.close()
   if (process.platform !== 'darwin') app.quit()
 })

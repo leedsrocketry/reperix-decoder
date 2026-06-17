@@ -16,6 +16,9 @@ const api = {
     ipcRenderer.on('serial:data', handler)
     return () => ipcRenderer.off('serial:data', handler)
   },
+
+  getFrames: (limit = 500): Promise<Array<{ id: number; ts: string; raw_hex: string; rssi: number | null; snr: number | null }>> =>
+    ipcRenderer.invoke('db:get-frames', limit),
 }
 
 if (process.contextIsolated) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Circle, Plug, PlugZap } from 'lucide-react'
 import { decodePayload, hexToBytes, FIELD_DISPLAY, type ParsedFrame } from '@/lib/parser'
 import { cn } from '@/lib/utils'
@@ -10,8 +10,25 @@ interface SerialMsg {
   rawHex?: string
   rssi?: number | null
   snr?: number | null
+  dbId?: number
+  ts?: string
   token?: string
   message?: string
+}
+
+function dbRowToFrame(row: { id: number; ts: string; raw_hex: string; rssi: number | null; snr: number | null }): ParsedFrame | null {
+  try {
+    return {
+      id: row.id,
+      timestamp: row.ts,
+      packet: decodePayload(hexToBytes(row.raw_hex)),
+      rssi: row.rssi,
+      snr: row.snr,
+      rawHex: row.raw_hex,
+    }
+  } catch {
+    return null
+  }
 }
 
 export default function RawPage() {
@@ -19,11 +36,22 @@ export default function RawPage() {
   const [status, setStatus] = useState('Disconnected')
   const [frames, setFrames] = useState<ParsedFrame[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const frameIdRef = useRef(0)
-  const listRef = useRef<HTMLDivElement>(null)
 
   const port = localStorage.getItem('serial-port') ?? ''
   const baud = JSON.parse(localStorage.getItem('baud-rate') ?? '115200') as number
+
+  // Load persisted frames on mount
+  useEffect(() => {
+    if (!window.api) return
+    window.api.getFrames(MAX_FRAMES).then(rows => {
+      const loaded = rows.flatMap(r => {
+        const f = dbRowToFrame(r)
+        return f ? [f] : []
+      })
+      setFrames(loaded)
+      if (loaded.length > 0) setSelectedId(loaded[0].id)
+    })
+  }, [])
 
   useEffect(() => {
     if (!window.api) return
@@ -34,20 +62,19 @@ export default function RawPage() {
       } else if (msg.type === 'error') {
         setStatus(`Error: ${msg.message}`)
         setConnected(false)
-      } else if (msg.type === 'frame' && msg.rawHex) {
+      } else if (msg.type === 'frame' && msg.rawHex && msg.dbId != null && msg.ts != null) {
         try {
-          const packet = decodePayload(hexToBytes(msg.rawHex))
           const frame: ParsedFrame = {
-            id: ++frameIdRef.current,
-            timestamp: new Date().toISOString().slice(11, 23),
-            packet,
+            id: msg.dbId,
+            timestamp: msg.ts,
+            packet: decodePayload(hexToBytes(msg.rawHex)),
             rssi: msg.rssi ?? null,
             snr: msg.snr ?? null,
             rawHex: msg.rawHex,
           }
           setFrames(prev => {
-            const next = [...prev, frame]
-            return next.length > MAX_FRAMES ? next.slice(-MAX_FRAMES) : next
+            const next = [frame, ...prev]
+            return next.length > MAX_FRAMES ? next.slice(0, MAX_FRAMES) : next
           })
           setSelectedId(id => id === null ? frame.id : id)
         } catch {
@@ -57,14 +84,6 @@ export default function RawPage() {
     })
     return unsub
   }, [])
-
-  // Auto-scroll list to bottom when new frames arrive
-  useEffect(() => {
-    const el = listRef.current
-    if (!el) return
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-    if (isNearBottom) el.scrollTop = el.scrollHeight
-  }, [frames.length])
 
   async function toggleConnection() {
     if (connected) {
@@ -113,10 +132,7 @@ export default function RawPage() {
       {/* Split pane */}
       <div className="flex flex-1 overflow-hidden">
         {/* Packet list */}
-        <div
-          ref={listRef}
-          className="w-64 flex-shrink-0 overflow-y-auto border-r border-border"
-        >
+        <div className="w-64 flex-shrink-0 overflow-y-auto border-r border-border">
           {frames.length === 0 && (
             <p className="px-4 py-6 text-center text-xs text-muted-foreground">
               {connected ? 'Waiting for packets…' : 'Connect to start receiving'}
