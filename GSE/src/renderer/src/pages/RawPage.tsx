@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Circle, Plug, PlugZap } from 'lucide-react'
 import { decodePayload, hexToBytes, FIELD_DISPLAY, type ParsedFrame } from '@/lib/parser'
+import { useConnection } from '@/context/ConnectionContext'
 import { cn } from '@/lib/utils'
 
 const MAX_FRAMES = 500
@@ -12,8 +12,6 @@ interface SerialMsg {
   snr?: number | null
   dbId?: number
   ts?: string
-  token?: string
-  message?: string
 }
 
 function dbRowToFrame(row: { id: number; ts: string; raw_hex: string; rssi: number | null; snr: number | null }): ParsedFrame | null {
@@ -32,17 +30,12 @@ function dbRowToFrame(row: { id: number; ts: string; raw_hex: string; rssi: numb
 }
 
 export default function RawPage() {
-  const [connected, setConnected] = useState(false)
-  const [status, setStatus] = useState('Disconnected')
+  const { connected } = useConnection()
   const [frames, setFrames] = useState<ParsedFrame[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [auto, setAuto] = useState(true)
   const listRef = useRef<HTMLDivElement>(null)
 
-  const port = localStorage.getItem('serial-port') ?? ''
-  const baud = JSON.parse(localStorage.getItem('baud-rate') ?? '115200') as number
-
-  // Load persisted frames on mount
   useEffect(() => {
     if (!window.api) return
     window.api.getFrames(MAX_FRAMES).then(rows => {
@@ -56,14 +49,9 @@ export default function RawPage() {
 
   useEffect(() => {
     if (!window.api) return
-    const unsub = window.api.onSerialData((raw) => {
+    return window.api.onSerialData(raw => {
       const msg = raw as SerialMsg
-      if (msg.type === 'status') {
-        setStatus(msg.token ?? 'unknown status')
-      } else if (msg.type === 'error') {
-        setStatus(`Error: ${msg.message}`)
-        setConnected(false)
-      } else if (msg.type === 'frame' && msg.rawHex && msg.dbId != null && msg.ts != null) {
+      if (msg.type === 'frame' && msg.rawHex && msg.dbId != null && msg.ts != null) {
         try {
           const frame: ParsedFrame = {
             id: msg.dbId,
@@ -77,56 +65,28 @@ export default function RawPage() {
             const next = [frame, ...prev]
             return next.length > MAX_FRAMES ? next.slice(0, MAX_FRAMES) : next
           })
-        } catch {
-          // malformed frame
-        }
+        } catch { }
       }
     })
-    return unsub
   }, [])
 
-  // When auto is on, scroll to top whenever a new packet arrives
   useEffect(() => {
     if (auto) listRef.current?.scrollTo({ top: 0 })
   }, [auto, frames.length])
-
-  async function toggleConnection() {
-    if (connected) {
-      await window.api.disconnect()
-      setConnected(false)
-      setStatus('Disconnected')
-    } else {
-      if (!port) {
-        setStatus('No port configured — set one in Settings')
-        return
-      }
-      setStatus(`Connecting to ${port}…`)
-      const res = await window.api.connect(port, baud)
-      if (res.ok) {
-        setConnected(true)
-        setStatus(`Connected · ${port} @ ${baud}`)
-      }
-    }
-  }
 
   function enableAuto() {
     setAuto(true)
     listRef.current?.scrollTo({ top: 0 })
   }
 
-  // In auto mode always show the newest packet; otherwise show the manually selected one
   const effectiveId = auto ? (frames[0]?.id ?? null) : selectedId
   const selected = frames.find(f => f.id === effectiveId) ?? null
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header bar */}
+      {/* Subheader */}
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
-        <Circle
-          className={cn('h-2.5 w-2.5 fill-current', connected ? 'text-green-500' : 'text-muted-foreground')}
-        />
-        <span className="flex-1 text-xs text-muted-foreground">{status}</span>
-        <span className="text-xs text-muted-foreground">{frames.length} packets</span>
+        <span className="flex-1 text-xs text-muted-foreground">{frames.length} packets</span>
         <button
           onClick={auto ? () => setAuto(false) : enableAuto}
           className={cn(
@@ -137,18 +97,6 @@ export default function RawPage() {
           )}
         >
           AUTO
-        </button>
-        <button
-          onClick={toggleConnection}
-          className={cn(
-            'flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors',
-            connected
-              ? 'border-destructive/50 text-destructive hover:bg-destructive/10'
-              : 'border-border hover:bg-accent'
-          )}
-        >
-          {connected ? <PlugZap className="h-3.5 w-3.5" /> : <Plug className="h-3.5 w-3.5" />}
-          {connected ? 'Disconnect' : 'Connect'}
         </button>
       </div>
 
@@ -190,7 +138,6 @@ export default function RawPage() {
         <div className="flex-1 overflow-y-auto">
           {selected ? (
             <div className="p-5">
-              {/* Link quality */}
               <div className="mb-4 flex gap-4 text-sm">
                 <span className="text-muted-foreground">RSSI</span>
                 <span className="font-mono font-medium">
@@ -205,7 +152,6 @@ export default function RawPage() {
                 </span>
               </div>
 
-              {/* Fields grid */}
               <div className="mb-6 grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5">
                 {FIELD_DISPLAY.map(({ key, label, format }) => (
                   <div key={key} className="contents">
@@ -215,7 +161,6 @@ export default function RawPage() {
                 ))}
               </div>
 
-              {/* Raw hex */}
               <div>
                 <p className="mb-1.5 text-xs font-medium uppercase tracking-widest text-muted-foreground">
                   Raw Hex

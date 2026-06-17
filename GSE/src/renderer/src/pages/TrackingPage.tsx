@@ -332,11 +332,11 @@ function AnglePanel({ frames }: { frames: ParsedFrame[] }) {
             {deg}
           </span>
           <span className="text-sm text-muted-foreground mt-0.5">degrees</span>
-          {latest && (
+          {/* {latest && (
             <span className="text-[10px] font-mono text-muted-foreground mt-3">
               raw {rawAngle}
             </span>
-          )}
+          )} */}
         </div>
         <div className="flex-1 flex justify-center items-center">
           <svg viewBox={`0 0 ${S} ${S}`} className="w-36 h-36">
