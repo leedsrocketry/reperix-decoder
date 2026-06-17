@@ -6,6 +6,7 @@ For GUI usage, import from parser.py directly:
 """
 
 import argparse
+import json
 import sys
 
 from parser import (
@@ -28,6 +29,40 @@ def run_demo(args):
 
     process_buffer(DEMO_RAW, on_packet, on_status)
     print("\n(demo complete - parsed built-in sample packets, no hardware used)")
+
+
+def run_serial_json(args):
+    """Stream minimal JSON lines for Electron IPC consumption."""
+    import os
+
+    def on_packet(d, rssi, snr, raw_hex):
+        print(json.dumps({"type": "frame", "rawHex": raw_hex, "rssi": rssi, "snr": snr}), flush=True)
+
+    def on_status(tok):
+        print(json.dumps({"type": "status", "token": tok}), flush=True)
+
+    def on_error(exc):
+        print(json.dumps({"type": "error", "message": str(exc)}), flush=True)
+        os._exit(1)
+
+    session = SerialSession(
+        port=args.port,
+        baud=args.baud,
+        on_packet=on_packet,
+        on_status=on_status,
+        csv_path=args.csv,
+        start_cmd=args.start,
+        on_error=on_error,
+    )
+    session.start()
+    try:
+        import time
+        while session.running:
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        session.stop()
 
 
 def run_serial(args):
@@ -73,10 +108,13 @@ def main():
     p.add_argument("--csv",       metavar="FILE",          help="append decoded rows to a CSV file")
     p.add_argument("--gps-int32", action="store_true",     help="decode lat/lng as int32*1e-7 instead of float32")
     p.add_argument("--demo",      action="store_true",     help="parse built-in sample packets and exit")
+    p.add_argument("--json",      action="store_true",     help="output one JSON line per frame (for Electron IPC)")
     args = p.parse_args()
 
     if args.demo:
         run_demo(args)
+    elif args.json:
+        run_serial_json(args)
     else:
         run_serial(args)
 
