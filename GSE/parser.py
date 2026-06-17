@@ -4,11 +4,11 @@ parser.py
 Reperix ground-station telemetry parser.
 
 Public surface (import these in main.py / GUI):
-    decode_payload(payload, gps_int32) -> dict
+    decode_payload(payload) -> dict
     process_buffer(buf, on_packet, on_status) -> bytes  (leftover bytes)
     format_record(d, rssi, snr, raw_hex) -> str
     csv_row(d, rssi, snr) -> str
-    SerialSession(port, baud, on_packet, on_status, *, gps_int32, csv_path, start_cmd)
+    SerialSession(port, baud, on_packet, on_status, *, csv_path, start_cmd)
     FIELD_ORDER, CSV_HEADER, DEFAULT_PORT, DEFAULT_BAUD, START_COMMAND
     DEMO_RAW  (bytes fixture for offline testing)
 
@@ -34,7 +34,7 @@ START_COMMAND   = "start101Reperix\n"
 
 PAYLOAD_MIN_BYTES = 40
 ACCEL_SCALE       = 10.0
-GPS_INT32_SCALE   = 1e-7
+GPS_INT32_SCALE   = 1e-6
 
 FIELD_ORDER = [
     "uid", "fw", "rx", "timeMPU", "status",
@@ -70,7 +70,7 @@ DEMO_RAW = (
 # Core decode
 # ---------------------------------------------------------------------------
 
-def decode_payload(payload: bytes, gps_int32: bool = False) -> dict:
+def decode_payload(payload: bytes) -> dict:
     """Decode one binary telemetry struct into a named-field dict."""
     if len(payload) < PAYLOAD_MIN_BYTES:
         raise ValueError(f"payload too short: {len(payload)} bytes")
@@ -82,12 +82,8 @@ def decode_payload(payload: bytes, gps_int32: bool = False) -> dict:
     d["timeMPU"]   = struct.unpack_from("<I", payload, 5)[0]   # CONFIRMED (ms)
     d["status"]    = payload[9]                                 # CONFIRMED
 
-    if gps_int32:
-        d["gpsLat"] = struct.unpack_from("<i", payload, 10)[0] * GPS_INT32_SCALE
-        d["gpsLng"] = struct.unpack_from("<i", payload, 14)[0] * GPS_INT32_SCALE
-    else:
-        d["gpsLat"] = struct.unpack_from("<f", payload, 10)[0]  # INFERRED (deg)
-        d["gpsLng"] = struct.unpack_from("<f", payload, 14)[0]  # INFERRED (deg)
+    d["gpsLat"] = struct.unpack_from("<i", payload, 10)[0] * GPS_INT32_SCALE
+    d["gpsLng"] = struct.unpack_from("<i", payload, 14)[0] * GPS_INT32_SCALE
 
     d["altitude"]  = struct.unpack_from("<i", payload, 18)[0]  # INFERRED (m)
     d["originAlt"] = struct.unpack_from("<h", payload, 22)[0]  # INFERRED (m)
@@ -210,8 +206,7 @@ class SerialSession:
     port, baud   : serial port settings
     on_packet    : callable(d, rssi, snr, raw_hex) -- invoked for each decoded packet
     on_status    : callable(token)                 -- invoked for GstartOk / Gerror / etc.
-    gps_int32    : if True, lat/lng decoded as int32*1e-7 instead of float32
-    csv_path     : if set, append CSV rows to this file
+csv_path     : if set, append CSV rows to this file
     start_cmd    : bytes/str sent on connect to begin streaming
     on_error     : callable(exc) -- invoked if the port can't be opened or fails mid-run
     """
@@ -223,7 +218,7 @@ class SerialSession:
         on_packet=None,
         on_status=None,
         *,
-        gps_int32: bool = False,
+        gps_int32: bool = True,
         csv_path: str | None = None,
         start_cmd: str = START_COMMAND,
         on_error=None,
