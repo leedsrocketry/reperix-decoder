@@ -1,9 +1,14 @@
-import { app, shell, BrowserWindow, session, ipcMain } from 'electron'
-import { join } from 'path'
+import { app, shell, BrowserWindow, session, ipcMain, protocol } from 'electron'
+import { join, dirname } from 'path'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
 import { SerialPort } from 'serialport'
-import { existsSync } from 'fs'
 import { insertFrame, getFrames } from './db'
+
+// Must be called before app is ready
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'tiles', privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true } },
+])
 
 let mainWindow: BrowserWindow | null = null
 let serialPort: SerialPort | null = null
@@ -151,6 +156,33 @@ ipcMain.handle('serial:disconnect', () => {
 app.whenReady().then(() => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'serial')
   session.defaultSession.setDevicePermissionHandler((details) => details.deviceType === 'serial')
+
+  // ── Tile cache protocol ────────────────────────────────────────────────────
+  // Serves map tiles from disk cache; fetches + caches on first request.
+  // Works offline once an area has been visited.
+  const tileCache = join(app.getPath('userData'), 'tile-cache')
+
+  protocol.handle('tiles', async (request) => {
+    const tilePath = new URL(request.url).pathname  // e.g. /5/16/11.png
+    const cacheFile = join(tileCache, tilePath)
+
+    if (existsSync(cacheFile)) {
+      return new Response(readFileSync(cacheFile), { headers: { 'Content-Type': 'image/png' } })
+    }
+
+    try {
+      const res = await fetch(`https://a.basemaps.cartocdn.com/light_all${tilePath}`)
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer())
+        mkdirSync(dirname(cacheFile), { recursive: true })
+        writeFileSync(cacheFile, buf)
+        return new Response(buf, { headers: { 'Content-Type': 'image/png' } })
+      }
+    } catch { /* offline — fall through */ }
+
+    return new Response(null, { status: 503 })
+  })
+
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

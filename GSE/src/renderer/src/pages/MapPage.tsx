@@ -86,10 +86,11 @@ export default function MapPage() {
       zoomControl: false,
     })
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', {
-      attribution: '© <a href="https://openstreetmap.org">OSM</a> © <a href="https://carto.com">CARTO</a>',
-      subdomains: 'abcd',
+    L.tileLayer('tiles://tiles/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap © CARTO',
       maxZoom: 21,
+      // blank tile when offline and not yet cached
+      errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==',
     }).addTo(map)
 
     // Zoom control bottom-right to stay out of sidebar's way
